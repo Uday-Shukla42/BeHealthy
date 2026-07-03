@@ -1,0 +1,139 @@
+// BeHealthy database schema
+// Run `npx prisma migrate dev --name init` after setting DATABASE_URL
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  PATIENT
+  DOCTOR
+  ADMIN
+}
+
+enum AppointmentStatus {
+  HELD        // slot reserved for a few minutes while patient fills the symptom form
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+  NO_SHOW
+}
+
+enum Urgency {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String
+  fullName     String
+  phone        String?
+  role         Role
+  createdAt    DateTime @default(now())
+
+  // Google Calendar OAuth tokens, stored per user once they connect their calendar
+  googleRefreshToken String?
+  googleAccessToken  String?
+  googleTokenExpiry  DateTime?
+
+  doctorProfile DoctorProfile?
+  appointmentsAsPatient Appointment[] @relation("PatientAppointments")
+  notifications Notification[]
+}
+
+model DoctorProfile {
+  id             String   @id @default(uuid())
+  userId         String   @unique
+  user           User     @relation(fields: [userId], references: [id])
+  specialization String
+  slotDurationMin Int     @default(20)
+  // working hours per weekday, e.g. { "MON": ["09:00","17:00"], "TUE": [...] }
+  workingHours   Json
+
+  leaves         DoctorLeave[]
+  appointments   Appointment[] @relation("DoctorAppointments")
+
+  @@index([specialization])
+}
+
+model DoctorLeave {
+  id        String   @id @default(uuid())
+  doctorId  String
+  doctor    DoctorProfile @relation(fields: [doctorId], references: [id])
+  date      DateTime  // stored as date-only (midnight UTC)
+  reason    String?
+  createdAt DateTime @default(now())
+
+  @@unique([doctorId, date])
+}
+
+model Appointment {
+  id        String   @id @default(uuid())
+
+  patientId String
+  patient   User     @relation("PatientAppointments", fields: [patientId], references: [id])
+
+  doctorId  String
+  doctor    DoctorProfile @relation("DoctorAppointments", fields: [doctorId], references: [id])
+
+  slotStart DateTime
+  slotEnd   DateTime
+  status    AppointmentStatus @default(HELD)
+  holdExpiresAt DateTime?   // only set while status = HELD
+
+  // pre-visit
+  symptomsText     String?
+  preVisitSummary  Json?    // { chiefComplaint, urgency, suggestedQuestions: [...] }
+  urgency          Urgency?
+
+  // post-visit
+  clinicalNotes      String?
+  prescription        Json?   // [{ drug, dose, frequencyPerDay, durationDays }]
+  postVisitSummary     String?
+
+  googleEventIdPatient String?
+  googleEventIdDoctor  String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  reminders MedicationReminder[]
+
+  // A doctor cannot have two CONFIRMED/HELD appointments in the same slot.
+  // Enforced at the application layer via a transaction + this unique index,
+  // which acts as the last line of defense against race conditions.
+  @@unique([doctorId, slotStart])
+  @@index([patientId])
+}
+
+model MedicationReminder {
+  id             String   @id @default(uuid())
+  appointmentId  String
+  appointment    Appointment @relation(fields: [appointmentId], references: [id])
+  drugName       String
+  scheduledFor   DateTime
+  sent           Boolean  @default(false)
+  attempts       Int      @default(0)
+  lastError      String?
+}
+
+model Notification {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  type      String   // BOOKING_CONFIRMATION | REMINDER | CANCELLATION | LEAVE_CONFLICT
+  channel   String   // EMAIL | CALENDAR
+  status    String   // PENDING | SENT | FAILED
+  attempts  Int      @default(0)
+  lastError String?
+  payload   Json?
+  createdAt DateTime @default(now())
+}
